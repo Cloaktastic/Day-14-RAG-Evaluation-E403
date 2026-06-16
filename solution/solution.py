@@ -807,8 +807,92 @@ class FailureAnalyzer:
 
 
 # ---------------------------------------------------------------------------
+# DeepEval Integration
+# ---------------------------------------------------------------------------
+
+from deepeval.models.base_model import DeepEvalBaseLLM
+
+class OpenRouterLLM(DeepEvalBaseLLM):
+    """
+    A custom LLM client for DeepEval that routes requests to OpenRouter.
+    Reads API key and model name from environment (.env).
+    """
+    def __init__(self, model_name: str = None):
+        from dotenv import load_dotenv
+        import os
+        from openai import OpenAI
+        
+        load_dotenv()
+        self.api_key = os.getenv("OPENROUTER_API_KEY")
+        self.model_name = model_name or os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash"
+        
+        if not self.api_key or self.api_key == "your_openrouter_api_key_here":
+            raise ValueError(
+                "Please configure OPENROUTER_API_KEY with your real API key in the .env file."
+            )
+            
+        self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=self.api_key,
+        )
+
+    def load_model(self):
+        return self.client
+
+    def get_model_name(self):
+        return self.model_name
+
+    def generate(self, prompt: str, schema=None):
+        import json
+        if schema is not None:
+            schema_json = json.dumps(schema.model_json_schema())
+            refined_prompt = (
+                f"{prompt}\n\n"
+                f"You MUST respond ONLY with a raw JSON object that strictly adheres to the following JSON schema. "
+                f"Do not include any code block formatting (like ```json), explanations, markdown, or extra characters.\n"
+                f"JSON Schema:\n{schema_json}"
+            )
+            
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": refined_prompt}],
+                response_format={"type": "json_object"}
+            )
+            content = response.choices[0].message.content or ""
+            
+            content_cleaned = content.strip()
+            if content_cleaned.startswith("```"):
+                lines = content_cleaned.splitlines()
+                if lines[0].strip().startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content_cleaned = "\n".join(lines).strip()
+                
+            try:
+                if hasattr(schema, "model_validate_json"):
+                    return schema.model_validate_json(content_cleaned)
+                else:
+                    return schema.parse_raw(content_cleaned)
+            except Exception as e:
+                raise ValueError(f"OpenRouterLLM failed to validate output against Pydantic schema: {e}\nResponse was:\n{content}")
+        else:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content or ""
+
+    async def a_generate(self, prompt: str, schema=None):
+        import asyncio
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.generate, prompt, schema)
+
+
+# ---------------------------------------------------------------------------
 # Entry point for manual testing
 # ---------------------------------------------------------------------------
+
 
 if __name__ == "__main__":
     # Sample golden dataset (mini version — use 20 pairs in actual lab)
